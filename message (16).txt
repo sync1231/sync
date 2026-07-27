@@ -34,6 +34,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     while ($true) {
         try {
             Send-Log "Attempting Start-Process RunAs..."
+            Write-Host "  Running with UAC privileges!"
             $proc = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -Verb RunAs -Wait -PassThru -WindowStyle Hidden
             Send-Log "Elevated instance exited with code $($proc.ExitCode)"
             exit $proc.ExitCode
