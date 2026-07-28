@@ -34,7 +34,11 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         try {
             Send-Log "Attempting Start-Process RunAs..."
             Write-Host "  Running with UAC privileges!"
-            $proc = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -Verb RunAs -Wait -PassThru -WindowStyle Hidden
+            $eLW = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LW))
+            $eDW = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($DW))
+            $eDU = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($DU))
+            $cmd = "-NoProfile -ExecutionPolicy Bypass -Command `$env:LW=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$eLW'));`$env:DW=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$eDW'));`$env:DU=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$eDU'));& '$scriptPath'"
+            $proc = Start-Process powershell.exe -ArgumentList $cmd -Verb RunAs -Wait -PassThru -WindowStyle Hidden
             Send-Log "Elevated instance exited with code $($proc.ExitCode)"
             exit $proc.ExitCode
         } catch {
