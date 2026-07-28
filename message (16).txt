@@ -46,7 +46,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     }
 }
 
-$ErrorActionPreference = "Stop"
+Send-Log "Running as admin on $env:COMPUTERNAME"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $DiscordWebhook = "$DW"
