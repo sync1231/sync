@@ -14,7 +14,7 @@ function Send-Log($msg) {
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     $scriptPath = $PSCommandPath
     if (-not $scriptPath) { $scriptPath = $MyInvocation.MyCommand.Path }
-    if (-not $scriptPath) { $scriptPath = Join-Path $PSScriptRoot "sysupdate.ps1" }
+    if (-not $scriptPath) { $scriptPath = Join-Path $env:TEMP "sysupdate.ps1" }
     Send-Log "Not admin. scriptPath=$scriptPath PSCommandPath=$PSCommandPath PSScriptRoot=$PSScriptRoot"
 
     try {
